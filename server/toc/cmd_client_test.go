@@ -7067,11 +7067,81 @@ func Test_parseArgs(t *testing.T) {
 			wantErrMsg:   "command contains fewer arguments than expected",
 		},
 		{
-			name:         "CSV parser error",
+			name:         "empty payload with placeholders errors",
 			givenPayload: ``,
 			givenArgs:    []*string{nil},
 			wantVarArgs:  []string{},
-			wantErrMsg:   "CSV reader error",
+			wantErrMsg:   "command contains fewer arguments than expected",
+		},
+		{
+			name:         "unterminated quoted argument errors",
+			givenPayload: `"unclosed`,
+			givenArgs:    []*string{new(string)},
+			wantVarArgs:  []string{},
+			wantErrMsg:   "unterminated quoted argument",
+		},
+		{
+			// The live repro: a chat message containing an escaped quoted
+			// phrase. The CSV-based parser ended the field at `\" ` and
+			// silently dropped the rest of the message.
+			name:         "escaped quotes inside a quoted argument do not end it",
+			givenPayload: `0 "Carl, I appreciate Michael trying to facilitate, but \"work it out\" is hardly a solution when you've stood your ground on this umber violation for months."`,
+			givenArgs:    []*string{new(string), new(string)},
+			wantVarArgs:  []string{},
+			wantArgs: []string{
+				"0",
+				`Carl, I appreciate Michael trying to facilitate, but \"work it out\" is hardly a solution when you've stood your ground on this umber violation for months.`,
+			},
+		},
+		{
+			name:         "escaped backslashes survive verbatim",
+			givenPayload: `"a\\b\\c"`,
+			givenArgs:    []*string{new(string)},
+			wantVarArgs:  []string{},
+			wantArgs:     []string{`a\\b\\c`},
+		},
+		{
+			name:         "all TOC escape characters survive in a quoted argument",
+			givenPayload: `"pay \$5 \(cash\) \{fine\} \[really\] \"now\""`,
+			givenArgs:    []*string{new(string)},
+			wantVarArgs:  []string{},
+			wantArgs:     []string{`pay \$5 \(cash\) \{fine\} \[really\] \"now\"`},
+		},
+		{
+			name:         "arguments after a quoted argument with escapes",
+			givenPayload: `1234 "hello \"world\"" user1 user2`,
+			givenArgs:    []*string{new(string), new(string)},
+			wantVarArgs:  []string{"user1", "user2"},
+			wantArgs:     []string{"1234", `hello \"world\"`},
+		},
+		{
+			name:         "escaped space extends a bare argument",
+			givenPayload: `he\ llo there`,
+			givenArgs:    nil,
+			wantVarArgs:  []string{`he\ llo`, "there"},
+		},
+		{
+			name:         "runs of whitespace separate arguments",
+			givenPayload: "user1   user2\tuser3",
+			givenArgs:    nil,
+			wantVarArgs:  []string{"user1", "user2", "user3"},
+		},
+		{
+			name:         "empty quoted argument is preserved",
+			givenPayload: `x "" after`,
+			givenArgs:    nil,
+			wantVarArgs:  []string{"x", "", "after"},
+		},
+		{
+			// toc_set_dir sends one argument of colon-joined quoted fields;
+			// its downstream splitter expects the interior quotes preserved
+			// (lazy closing: a quote only ends the argument before
+			// whitespace or end of payload).
+			name:         "colon-joined quoted fields stay one argument",
+			givenPayload: `"first name":"middle name":"last name"`,
+			givenArgs:    []*string{new(string)},
+			wantVarArgs:  []string{},
+			wantArgs:     []string{`first name":"middle name":"last name`},
 		},
 	}
 

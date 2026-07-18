@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/csv"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -2586,18 +2585,21 @@ func (s OSCARProxy) newHTTPAuthToken(me state.IdentScreenName) (string, error) {
 // parseArgs extracts arguments from a TOC command. Each positional argument is
 // assigned to its corresponding args pointer. It returns the remaining
 // arguments as varargs.
+//
+// Tokenization follows the TOC wire format rather than CSV rules: arguments
+// are separated by runs of whitespace, an argument may be enclosed in double
+// quotes (which are stripped), and a backslash escapes the character that
+// follows it — including a quote — without ending the argument. Escape
+// sequences are preserved verbatim in the returned tokens; callers that need
+// the plain text call unescape, as before.
 func parseArgs(payload []byte, args ...*string) (varArgs []string, err error) {
 	if len(payload) == 0 && len(args) == 0 {
 		return []string{}, nil
 	}
-	reader := csv.NewReader(bytes.NewReader(payload))
-	reader.Comma = ' '
-	reader.LazyQuotes = true
-	reader.TrimLeadingSpace = true
 
-	segs, err := reader.Read()
+	segs, err := tokenizeArgs(payload)
 	if err != nil {
-		return []string{}, fmt.Errorf("CSV reader error: %w", err)
+		return []string{}, fmt.Errorf("tokenizer error: %w", err)
 	}
 
 	if len(segs) < len(args) {
@@ -2613,6 +2615,81 @@ func parseArgs(payload []byte, args ...*string) (varArgs []string, err error) {
 
 	// dump remaining arguments as varargs
 	return segs[len(args):], err
+}
+
+// tokenizeArgs splits a TOC command payload into arguments, honoring the
+// protocol's backslash escaping. This job previously belonged to a
+// csv.Reader, but CSV has no concept of backslash escapes: a message such as
+// `"she said \"hi\" today"` had its field terminated at the escaped closing
+// quote, silently truncating everything after it. Escape pairs are kept
+// verbatim so unescape can process them later; only an argument's enclosing
+// quotes are removed.
+func tokenizeArgs(payload []byte) ([]string, error) {
+	var (
+		tokens   []string
+		cur      strings.Builder
+		inToken  bool
+		inQuotes bool
+	)
+	for i := 0; i < len(payload); i++ {
+		c := payload[i]
+		switch {
+		case c == '\\':
+			// keep the escape pair verbatim; unescape handles it later
+			inToken = true
+			cur.WriteByte(c)
+			if i+1 < len(payload) {
+				i++
+				cur.WriteByte(payload[i])
+			}
+		case c == '"':
+			switch {
+			case inQuotes:
+				// Lazy closing: a quote only ends the argument when followed
+				// by whitespace or the end of the payload. Interior quotes
+				// are content — toc_set_dir and toc_dir_search send one
+				// argument of colon-joined quoted fields
+				// ("first":"middle":"last") whose downstream splitter
+				// expects the interior quotes preserved.
+				if i+1 == len(payload) || isTOCSpace(payload[i+1]) {
+					inQuotes = false
+				} else {
+					cur.WriteByte(c)
+				}
+			case !inToken:
+				inQuotes = true
+				inToken = true
+			default:
+				// a bare quote mid-token is content, not structure
+				cur.WriteByte(c)
+			}
+		case isTOCSpace(c):
+			if inQuotes {
+				cur.WriteByte(c)
+			} else if inToken {
+				tokens = append(tokens, cur.String())
+				cur.Reset()
+				inToken = false
+			}
+		default:
+			inToken = true
+			cur.WriteByte(c)
+		}
+	}
+	if inQuotes {
+		return nil, fmt.Errorf("unterminated quoted argument")
+	}
+	if inToken {
+		tokens = append(tokens, cur.String())
+	}
+	return tokens, nil
+}
+
+// isTOCSpace reports whether c separates TOC command arguments. NUL counts:
+// TOC frames are NUL-terminated C strings, and the terminator can reach the
+// parser as part of the payload.
+func isTOCSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == 0
 }
 
 // runtimeErr is a convenience function that logs an error and returns a TOC
