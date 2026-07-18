@@ -500,7 +500,13 @@ func TOC(deps Container) *toc.Server {
 			SessionRetriever:  deps.inMemorySessionManager,
 			RandIntn:          rand.Intn,
 		},
-		toc.NewIPRateLimiter(rate.Every(1*time.Minute), 10, 1*time.Minute),
+		// The login limiter guards against brute-force attempts, but every
+		// client behind one NAT/tailnet IP shares its budget — a bot fleet
+		// needs a bigger burst than the stock 10/minute (configurable;
+		// defaults preserve stock behavior).
+		toc.NewIPRateLimiter(
+			rate.Every(time.Duration(deps.cfg.TOCLoginRateSeconds)*time.Second),
+			deps.cfg.TOCLoginRateBurst, 1*time.Minute),
 		deps.icbmSvc.RestoreWarningLevel,
 		deps.icbmSvc.UpdateWarnLevel,
 	)
